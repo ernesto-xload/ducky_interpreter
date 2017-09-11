@@ -6,6 +6,8 @@ Also works in any Arduino Leonardo (original or clone) + SD board,please keep in
 
 ![Atmega32u4 + microsd board](board1.jpg)
 
+WARNING: you must install [this custom version of Arduino Keyboard library]https://github.com/ernesto-xload/arduino_keyboardlib
+
 Download and installation
 =========================
 - Click "Clone or download" -> "Download ZIP"
