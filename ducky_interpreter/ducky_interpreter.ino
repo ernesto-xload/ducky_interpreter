@@ -1,514 +1,753 @@
-/*
- *  Rubber Ducky script interpreter
- *
- *  Explanation: This code run Rubber Ducky scripts directly in cheap
- *               Atmega32u4 + microsd boards just copying to microSD.
- *               Also works in any Arduino Leonardo (original or clone) + SD board,
- *               please keep in mind connect CS pin to digital 4 or modify this code
- *
- *  Use:
- *    - Compile and load this code at board as Arduino Leonardo.
- *    - Rename your Rubber Ducky script to script.txt at microsd card
- *    - Insert microsd card at your board
- *    - Hack & fun! ;)
- *
- *  If you want to configure the kayboard layout download this library: https://github.com/ernesto-xload/arduino_keyboardlib
- *  http://sanchezpano.info
- *
- *  Version:		0.1 beta
- *  Design:		Ernesto Sanchez
- *  Implementation:	Ernesto Sanchez
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
- */
-
-////////////////////////////////////////////////////////////////////////////////
-////////////////////////////////// CONFIG SECTION //////////////////////////////
-////////////////////////////////////////////////////////////////////////////////
-
-//#define DEBUG_ON //Configure serial debug _WARNING:_ If debug is enabled script will start when serial monitor is opened
-#define BLINK_AT_END // Blink at end  or not
-#define SCRIPT_FILENAME "script.txt"
-
-////////////////////////////////////////////////////////////////////////////////
-////////////////////////////////////////////////////////////////////////////////
-////////////////////////////////////////////////////////////////////////////////
-
+#include <ArduinoKeyboardLib.h>
 #include <SPI.h>
 #include <SD.h>
-#include <string.h>
-#include "Keyboard.h"
 
-//Global variables
+#define KEY_MENU 0xED
+#define KEY_BREAK 0xD0
+#define KEY_NUMLOCK 0xDB
+#define KEY_PRINTSCREEN 0xCE
+#define KEY_SCROLLLOCK 0xCF
+#define KEY_SPACE 0xB4
+
+const int chipSelect = 4;
+String cmd;
+String arg;
+String mode;
+String lang = "en";
+String payload;
+String prevCmd;
+String prevArg;
+char argChar;
+char prevArgChar;
+char charBuff;
+char breakChar;
+int defaultDelay = 0;
+int led2 = 8;
+File root;
 File myFile;
-int led = 13;
-char command[255];
-char readed_char;
-int globalmodifiers=0;
-unsigned long previous_line=0,current_line=0,next_line=0;
-long repeat_times=-1,tmp_repeat_times=0;
+bool errLog;
+byte inChar[64];
+byte modifier[64];
+byte outChar[64];
+byte modifierKey;
 
-//Functions
-void print_ram(void);
-int process_commad (char*);
-int str_start(char*,char const*);
-void process_string_commmand(void);
 
-void setup()
-{
-  int special_command=0;
-  unsigned int i=0,j=0;
-  
-  //Set led pin as output
-  pinMode(led, OUTPUT); //LED
-  digitalWrite(led, LOW); //Led turn-off
-
-  #ifdef DEBUG_ON
-  Serial.begin(9600);
-  while (!Serial) {
-    ; // wait for serial port to connect. Needed for native USB port only
+void printDirectory(File dir, int numTabs) {
+  while (true) {
+    File entry =  dir.openNextFile();
+    if (! entry) {
+      break;
+    }
+    for (uint8_t i = 0; i < numTabs; i++) {
+      Serial.print('\t');
+    }
+    Serial.print(entry.name());
+    if (entry.isDirectory()) {
+      Serial.println("/");
+      printDirectory(entry, numTabs + 1);
+    } else {
+      Serial.print("\t\t");
+      Serial.println(entry.size(), DEC);
+    }
+    entry.close();
   }
-  Serial.println(F("Rubber Ducky script interpreter for arduino"));
-  Serial.println(F("By Ernesto a.k.a. Xload"));
-  print_ram();
-  #endif
+}
 
-  
-  //Set SD card CS pin as output
-  pinMode(4, OUTPUT);
-  
-  //Initializing SD card
-  if (!SD.begin(4)) {
-    #ifdef DEBUG_ON
-    Serial.println(F("error beggining SD card"));
-    #endif
+String inputData() {
+  String inputStr;
+  while (1) {
+    if (Serial.available() > 0) {
+      inputStr = Serial.readStringUntil('\n');
+      break;
+    }
   }
+  return inputStr;
+}
 
-  delay(1000);
-  
-  // Read script file
-  myFile = SD.open(SCRIPT_FILENAME);
+void loadLangMap(String fileName) {
+  myFile = SD.open(fileName);
+  int counter = 0;
   if (myFile) {
     while (myFile.available()) {
-      readed_char=myFile.read();
-      #ifdef DEBUG_ON
-      Serial.print(" ");
-      if((readed_char>32) && (readed_char<127)){ //Only print printable chars
-        Serial.print(readed_char);
-      }
-      else {
-        Serial.print(" ");
-      }
-      Serial.print(" ");
-      Serial.print("0x");
-      Serial.println(readed_char,HEX);
-      #endif
-      /*
-      if(readed_char=='\x0a'){ // If readed_char is LF process it
-        process_new_line();
-      }
-      */
-      
-      if(readed_char!='\x0d'){ // If readed_char is CR just ignore it (We only need LF for new line)
-        command[i]=readed_char;
-        command[i+1]='\x00'; // End string
-        i++;
-  
-        // First process commands that need read entire line
-        if(str_start(command,"STRING ")){
-            //Special case STRING
-            process_string_commmand();
-            command[i-1]='\x00';
-            command[0]='\x00';
-            i=0;
-        }
-  
-        if(str_start(command,"REM ")){
-            //Special case REM
-            #ifdef DEBUG_ON
-            Serial.println(F("REM"));
-            #endif
-            //Read till LF
-            while(!(readed_char=='\x0a')){
-              readed_char=myFile.read();
-            }
-            process_new_line();
-            command[0]='\x00';
-            i=0;
-        }
-  
-        if (str_start(command,"DELAY ")){
-          #ifdef DEBUG_ON
-          Serial.print(F("DELAY "));
-          #endif
-          while(!(readed_char=='\x0a')){
-            readed_char=myFile.read();
-            command[i]=readed_char;
-            i++;
-          }
-          #ifdef DEBUG_ON
-          Serial.println(atoi(command + 6));
-          #endif
-          delay(atoi(command + 6));
-          process_new_line();
-          command[i-1]='\x00';
-          i=0;
-          command[0]='\x00';
-        }
-
-        if (str_start(command,"REPEAT ")){
-          #ifdef DEBUG_ON
-          Serial.println(F("REPEAT"));
-          #endif
-          while(!(readed_char=='\x0a')){
-            readed_char=myFile.read();
-            command[i]=readed_char;
-            i++;
-          }
-          
-          tmp_repeat_times=atoi(command + 7);
-
-          #ifdef DEBUG_ON
-          Serial.print(F(" previous_line: "));
-          Serial.println(previous_line);
-          Serial.print(F(" tmp_repeat_times: "));
-          Serial.println(tmp_repeat_times);
-          Serial.print(F(" repeat_times:"));
-          Serial.println(repeat_times);
-          #endif
-
-          if(repeat_times<0){ //is the first time that we process this REPEAT
-            repeat_times=tmp_repeat_times; //set repeat_times to readed value
-            current_line=previous_line;
-            next_line=myFile.position();
-            myFile.seek(previous_line); //Jump to file previous lune
-          }
-
-          if(repeat_times>0){ //a REPEAT is being processed
-            repeat_times--; //decrease repeat_times
-            current_line=previous_line;
-            myFile.seek(previous_line); //Jump to file previous lune
-          }
-
-          if(repeat_times==0){ //REPEAT ended
-            repeat_times=-1; //set repeat_times to -1
-            myFile.seek(next_line); //Jump to next line
-            next_line=0;
-          }
-          i=0;
-          command[0]='\x00';
-        }
-  
-        // Second process commands that are just keys and modifiers
-        if (((readed_char==' ')||(readed_char=='+'))) {
-          command[i-1]='\x00';
-          if (strlen(command)>0){
-            process_commad(command);
-          }
-          i=0;
-        }
-  
-        if ((readed_char=='\x0a')) {
-          command[i-1]='\x00';
-          if (strlen(command)>0){
-            process_commad(command);
-            releaseallkeys();
-            process_new_line();
-          }
-          ///process_new_line();
-          i=0;
-        }
-      }
-      else {
-        #ifdef DEBUG_ON
-        Serial.println(F("Readed 0x0D ==> Skip"));
-        #endif
-        ;
-      }
+      inChar[counter] = myFile.read();
+      modifier[counter] = myFile.read();
+      outChar[counter] = myFile.read();
+      counter += 1;
     }
     myFile.close();
-    command[i]='\x00';
-    if (strlen(command)>0){
-      process_commad(command);
+  } else {
+    Serial.println("error opening file " + fileName);
+  }
+}
+
+byte convertLangChar(byte in) {
+  for (int i = 0; i <= 64; i++) {
+    if (inChar[i]) {
+      if (inChar[i] == in) {
+        modifierKey = modifier[i];
+        return outChar[i];
+      }
     }
-    releaseallkeys();
+    else {
+      return in;
+    }
+  }
+}
+
+void printChar(byte in) {
+  if (modifierKey) {
+    Keyboard.press(modifierKey);
+    delay(5);
+    Keyboard.write(in);
+    delay(5);
+    Keyboard.release(modifierKey);
+    modifierKey = 0;
   }
   else {
-    // Error opening script.txt
-    // script.txt does not exist or there is a microSD problem
-    #ifdef DEBUG_ON
-    Serial.println(F("error opening script.txt"));
-    #endif
-    while(1);
- 
+    Keyboard.write(in);
+    delay(5);
   }
-  
 }
 
-void loop()
-{
-  #ifdef BLINK_AT_END
-  digitalWrite(led, HIGH);
-  delay(1500);
-  digitalWrite(led, LOW);
-  delay(1500);
-  #endif
+void pressChar(byte in) {
+  if (modifierKey) {
+    Keyboard.press(modifierKey);
+    delay(5);
+    Keyboard.press(in);
+    delay(5);
+    Keyboard.release(modifierKey);
+    modifierKey = 0;
+  }
+  else {
+    Keyboard.press(in);
+    delay(5);
+  }
 }
 
-/*
- * All commands: https://github.com/hak5darren/USB-Rubber-Ducky/wiki/Duckyscript
- * TODO:
- * - NUMLOCK
- * - SCROLLLOCK
- * - DEFAULT_DELAY DEFAULTDELAY
- */
-
-int process_commad (char* command) {
-  int i=0;
-  #ifdef DEBUG_ON
-  Serial.println(F("Process_commad()"));
-  Serial.print(F(" Command: \""));
-  Serial.print(command);
-  Serial.println("\"");
-  #endif
-
-  // Modifer keys
-  
-  // GUI or WINDOWS
-  if (!strcmp(command,"WINDOWS")||!strcmp(command,"GUI")) {
-    globalmodifiers=KEY_LEFT_GUI;
-    sendkey(0,KEY_LEFT_GUI);
-    return 0;
+String readConfig(String fileName) {
+  String fileContent = "";
+  myFile = SD.open(fileName);
+  if (myFile) {
+    while (myFile.available()) {
+      fileContent += char(myFile.read());
+    }
+    return fileContent;
+    myFile.close();
+  } else {
+    Serial.println("error opening file");
   }
-
-  // ALT
-  if (!strcmp(command,"ALT")) {
-     sendkey(0,KEY_LEFT_ALT);
-     return 0;
-  }
-
-  // CTRL
-  if (!strcmp(command,"CTRL")) {
-     sendkey(0,KEY_LEFT_CTRL);
-     return 0;
-  }
-
-  // SHIFT
-  if (!strcmp(command,"SHIFT")) {
-     sendkey(0,KEY_LEFT_SHIFT);
-     return 0;
-  }
-
-  
-  //Single keyboard keys
-  
-  //F1-F2 single stroke key
-  if (str_start(command,"F")) {
-    sendkey(KEY_F1+((atoi(command+1))-1),0);
-    return 0;
-  }
-  
-  if (!strcmp(command,"TAB")) {
-     sendkey(KEY_TAB,0);
-     return 0;
-  }
-  
-  if (!strcmp(command,"LEFTARROW")) {
-     sendkey(KEY_LEFT_ARROW,0);
-     return 0;
-  }
-  
-  if (!strcmp(command,"RIGHTARROW")) {
-     sendkey(KEY_RIGHT_ARROW,0);
-     return 0;
-  }
-  
-  if (!strcmp(command,"UPARROW")) {
-     sendkey(KEY_UP_ARROW,0);
-     return 0;
-  }
-  
-  if (!strcmp(command,"DOWNARROW")) {
-     sendkey(KEY_DOWN_ARROW,0);
-     return 0;
-  }
-
-  if (!strcmp(command,"PRINTSCREEN")) {
-     sendkey(KEY_PRINTSCREEN,0);
-     return 0;
-  }
-
-  if (!strcmp(command,"MENU")||!strcmp(command,"APP")) {
-    sendkey(KEY_MENU,0);
-    return 0;
-  }
-
-  if (!strcmp(command,"ENTER")) {
-    sendkey(KEY_RETURN,0);
-    return 0;
-  }
-  
-  if (!strcmp(command,"led_on")) { 
-    digitalWrite(led, HIGH);
-    return 0;
-  }
-  
-  if (!strcmp(command,"led_off")) {
-    digitalWrite(led, LOW);
-    return 0;
-  }
-
-  if (!strcmp(command,"ESC")||!strcmp(command,"ESCAPE")) {
-    sendkey(KEY_ESC,0);
-    return 0;
-  }
-
-  if (!strcmp(command,"HOME")) {
-    sendkey(KEY_HOME,0);
-    return 0;
-  }
-
-  if (!strcmp(command,"SPACE")) {
-    sendkey(' ',0);
-    return 0;
-  }
-
-  if (!strcmp(command,"INSERT")) {
-    sendkey(KEY_INSERT,0);
-    return 0;
-  }
-
-  if (!strcmp(command,"DELETE")) {
-    sendkey(KEY_DELETE,0);
-    return 0;
-  }
-  
-  if (!strcmp(command,"PAGEUP")) {
-    sendkey(KEY_PAGE_UP,0);
-    return 0;
-  }
-
-  if (!strcmp(command,"PAGEDOWN")) {
-    sendkey(KEY_PAGE_DOWN,0);
-    return 0;
-  }
-
-  if (!strcmp(command,"BREAK")||!strcmp(command,"PAUSE")) {
-    delay(atoi(command + 6));
-    return 0;
-  }
-
-  if (!strcmp(command,"END")) {
-    sendkey(KEY_END,0);
-    return 0;
-  }
-
-  for(i=0;i<strlen(command);i++){
-    sendkey(command[i],0);
-  }
-/*
-  if (strlen(command)==1) {
-    sendkey(command[0],0);
-  }
-*/
-  
-  return 1;
 }
 
-void process_string_commmand(void){
-  #ifdef DEBUG_ON
-  Serial.print(F("STRING "));
-  #endif
-  readed_char=myFile.read();
-  while(!(readed_char=='\x0a')){
-    #ifdef DEBUG_ON
-    Serial.print(readed_char);
-    #endif
-    Keyboard.print(readed_char);
-    readed_char=myFile.read();
+void writeConfig(String fileName, String inputData) {
+  SD.remove(fileName);
+  myFile = SD.open(fileName, FILE_WRITE);
+  if (myFile) {
+    myFile.print(inputData);
+    myFile.close();
   }
-  #ifdef DEBUG_ON
-  Serial.println();
-  #endif
-  process_new_line();
 }
 
-void sendkey(int key, int modifiers){
-  #ifdef DEBUG_ON
-  Serial.println(F("SendKey:"));
-  Serial.print(F(" key: "));
-  Serial.println(key,HEX);
-  Serial.print(F(" modifiers: "));
-  Serial.println(modifiers,BIN);
-  #endif
-  if(modifiers!=0){
-    Keyboard.press(modifiers);
+void cmdGui (char argChar_l) {
+  Keyboard.press(KEY_LEFT_GUI);
+  delay(100);
+  if (argChar != 0x00) {
+    //Keyboard.press(argChar_l);
+    pressChar(convertLangChar(argChar_l));
+    delay(100);
   }
-  if(key!=0){
-    Keyboard.press(key);
-  }
-  }
-
-void releaseallkeys(void){
-  #ifdef DEBUG_ON
-  Serial.println(F("Release all keys"));
-  #endif
-  globalmodifiers=0;
   Keyboard.releaseAll();
+  prevCmd = cmd;
+  cmd = "";
+  prevArgChar = argChar_l;
+  argChar = 0x00;
 }
 
-//return 1 if strlong start by strshort and 0 if not
-int str_start(char*strlong,char const*strshort){
-  int i,j=1;
-  for(i=0;i<strlen(strshort);i++){
-    if(strlong[i]!=strshort[i]) j=0;
+void cmdRem () {
+  cmd = "";
+  arg = "";
+}
+
+void cmdDefaultDelay (String arg_l) {
+  defaultDelay = arg_l.toInt();
+  cmd = "";
+  arg = "";
+}
+
+void cmdDelay (String arg_l) {
+  delay(arg_l.toInt());
+  prevCmd = cmd;
+  cmd = "";
+  prevArg = arg_l;
+  arg = "";
+}
+
+void cmdPressKey(int key) {
+  //Keyboard.press(key);
+  pressChar(convertLangChar(key));
+  delay(100);
+  Keyboard.release(key);
+  prevCmd = cmd;
+  cmd = "";
+  prevArg = arg;
+  arg = "";
+}
+
+void cmdString (File dataFile) {
+  while (true) {
+    charBuff = dataFile.read();
+    if (charBuff == '\n') {
+      //Keyboard.print(charBuff); //adds \n at the end of the line
+      break;
+    }
+    else {
+      //Keyboard.print(charBuff);
+      printChar(convertLangChar(charBuff));
+    }
   }
-  return j;
+  cmd = "";
+  arg = "";
 }
 
-void process_new_line(void){
-  previous_line=current_line;
-  current_line=myFile.position(); 
-  #ifdef DEBUG_ON
-  Serial.println(F("Process new line"));
-  Serial.print(F(" previous_line: "));
-  Serial.println(previous_line);
-  Serial.print(F(" current_line: "));
-  Serial.println(current_line);
-  #endif
+void parseCmd(File dataFile) {
+  while (true) {
+    charBuff = dataFile.read();
+    if (charBuff == ' ' || charBuff == '\n' || cmd.length() > 15) {
+      breakChar = charBuff;
+      break;
+    }
+    else {
+      cmd = cmd + charBuff;
+    }
+  }
 }
 
-// Debug functions
-
-#ifdef DEBUG_ON
-void print_ram(void) {
-  Serial.print(availableMemory());
-  Serial.println(F(" bytes free of 2560 (RAM)"));
+void parseArg(File dataFile) {
+  while (true) {
+    charBuff = dataFile.read();
+    if (charBuff == '\n') {
+      break;
+    }
+    else {
+      arg = arg + charBuff;
+    }
+  }
 }
-// this function return the number of bytes currently free in RAM
-int availableMemory() {
-  int size = 2560;
-  
-  byte *buf;
 
-  while ((buf = (byte *) malloc(--size)) == NULL);
+void cmdKeyCombo(int key, String arg_l) {
+  String argKey;
+  int argLength = arg_l.length();
 
-  free(buf);
+  Keyboard.press(key);
+  delay(100);
 
-  return size;
+  for (int i = 0; i <= argLength; i++) {
+    charBuff = arg_l.charAt(i);
+    if (charBuff == ' ' || charBuff == '\n') {
+      if (argKey.length() == 1) {
+        //Keyboard.press(argKey.charAt(0));
+        pressChar(convertLangChar(argKey.charAt(0)));
+        delay(100);
+      }
+      else {
+        if (argKey == "ENTER") {
+          Keyboard.press(KEY_RETURN);
+        }
+        else if (argKey == "MENU" || argKey == "APP") {
+          Keyboard.press(KEY_MENU);
+        }
+        else if (argKey == "DOWNARROW" || argKey == "DOWN") {
+          Keyboard.press(KEY_DOWN_ARROW);
+        }
+        else if (argKey == "LEFTARROW" || argKey == "LEFT") {
+          Keyboard.press(KEY_LEFT_ARROW);
+        }
+        else if (argKey == "RIGHTARROW" || argKey == "RIGHT") {
+          Keyboard.press(KEY_RIGHT_ARROW);
+        }
+        else if (argKey == "UPARROW" || argKey == "UP") {
+          Keyboard.press(KEY_UP_ARROW);
+        }
+        else if (argKey == "BREAK" || argKey == "PAUSE") {
+          Keyboard.press(KEY_BREAK);
+        }
+        else if (argKey == "CAPSLOCK") {
+          Keyboard.press(KEY_CAPS_LOCK);
+        }
+        else if (argKey == "DELETE") {
+          Keyboard.press(KEY_DELETE);
+        }
+        else if (argKey == "END") {
+          Keyboard.press(KEY_END);
+        }
+        else if (argKey == "ESC" || argKey == "ESCAPE") {
+          Keyboard.press(KEY_ESC);
+        }
+        else if (argKey == "HOME") {
+          Keyboard.press(KEY_HOME);
+        }
+        else if (argKey == "INSERT") {
+          Keyboard.press(KEY_INSERT);
+        }
+        else if (argKey == "NUMLOCK") {
+          Keyboard.press(KEY_NUMLOCK);
+        }
+        else if (argKey == "PAGEUP") {
+          Keyboard.press(KEY_PAGE_UP);
+        }
+        else if (argKey == "PAGEDOWN") {
+          Keyboard.press(KEY_PAGE_DOWN);
+        }
+        else if (argKey == "PRINTSCREEN") {
+          Keyboard.press(KEY_PRINTSCREEN);
+        }
+        else if (argKey == "SCROLLLOCK") {
+          Keyboard.press(KEY_SCROLLLOCK);
+        }
+        else if (argKey == "SPACE") {
+          Keyboard.press(KEY_SPACE);
+        }
+        else if (argKey == "TAB") {
+          Keyboard.press(KEY_TAB);
+        }
+        else if (argKey == "ALT") {
+          Keyboard.press(KEY_LEFT_ALT);
+        }
+        else if (argKey == "SHIFT") {
+          Keyboard.press(KEY_LEFT_SHIFT);
+        }
+        else if (argKey == "CTRL") {
+          Keyboard.press(KEY_LEFT_CTRL);
+        }
+        else if (argKey == "F1") {
+          Keyboard.press(KEY_F1);
+        }
+        else if (argKey == "F2") {
+          Keyboard.press(KEY_F2);
+        }
+        else if (argKey == "F3") {
+          Keyboard.press(KEY_F3);
+        }
+        else if (argKey == "F4") {
+          Keyboard.press(KEY_F4);
+        }
+        else if (argKey == "F5") {
+          Keyboard.press(KEY_F5);
+        }
+        else if (argKey == "F6") {
+          Keyboard.press(KEY_F6);
+        }
+        else if (argKey == "F7") {
+          Keyboard.press(KEY_F7);
+        }
+        else if (argKey == "F8") {
+          Keyboard.press(KEY_F8);
+        }
+        else if (argKey == "F9") {
+          Keyboard.press(KEY_F9);
+        }
+        else if (argKey == "F10") {
+          Keyboard.press(KEY_F10);
+        }
+        else if (argKey == "F11") {
+          Keyboard.press(KEY_F11);
+        }
+        else if (argKey == "F12") {
+          Keyboard.press(KEY_F12);
+        }
+        else if (argKey == "GUI" || argKey == "WINDOWS") {
+          Keyboard.press(KEY_LEFT_GUI);
+        }
+        delay(100);
+      }
+      argKey = "";
+    }
+    else {
+      argKey = argKey + charBuff;
+    }
+  }
+  Keyboard.releaseAll();
+  prevCmd = cmd;
+  cmd = "";
+  prevArg = arg;
+  arg = "";
 }
-#endif
 
+void cmdRepeat (String arg_l) {
+  int counter = arg_l.toInt();
+  argChar = prevArgChar;
 
+  while (counter) {
+    if (defaultDelay != 0) {
+      delay(defaultDelay);
+    }
+
+    cmd = prevCmd;
+    arg = prevArg;
+
+    counter -= 1;
+
+    if (prevCmd == "GUI" || prevCmd == "WINDOWS") {
+      cmdGui(prevArgChar);
+    }
+    else if (prevCmd == "DELAY") {
+      cmdDelay(prevArg);
+    }
+    else if (prevCmd == "ENTER") {
+      cmdPressKey(KEY_RETURN);
+    }
+    else if (prevCmd == "MENU" || prevCmd == "APP") {
+      cmdPressKey(KEY_MENU);
+    }
+    else if (prevCmd == "DOWNARROW" || prevCmd == "DOWN") {
+      cmdPressKey(KEY_DOWN_ARROW);
+    }
+    else if (prevCmd == "LEFTARROW" || prevCmd == "LEFT") {
+      cmdPressKey(KEY_LEFT_ARROW);
+    }
+    else if (prevCmd == "RIGHTARROW" || prevCmd == "RIGHT") {
+      cmdPressKey(KEY_RIGHT_ARROW);
+    }
+    else if (prevCmd == "UPARROW" || prevCmd == "UP") {
+      cmdPressKey(KEY_UP_ARROW);
+    }
+    else if (prevCmd == "BREAK" || prevCmd == "PAUSE") {
+      cmdPressKey(KEY_BREAK);
+    }
+    else if (prevCmd == "CAPSLOCK") {
+      cmdPressKey(KEY_CAPS_LOCK);
+    }
+    else if (prevCmd == "DELETE") {
+      cmdPressKey(KEY_DELETE);
+    }
+    else if (prevCmd == "END") {
+      cmdPressKey(KEY_END);
+    }
+    else if (prevCmd == "ESC" || prevCmd == "ESCAPE") {
+      cmdPressKey(KEY_ESC);
+    }
+    else if (prevCmd == "HOME") {
+      cmdPressKey(KEY_HOME);
+    }
+    else if (prevCmd == "INSERT") {
+      cmdPressKey(KEY_INSERT);
+    }
+    else if (prevCmd == "NUMLOCK") {
+      cmdPressKey(KEY_NUMLOCK);
+    }
+    else if (prevCmd == "PAGEUP") {
+      cmdPressKey(KEY_PAGE_UP);
+    }
+    else if (prevCmd == "PAGEDOWN") {
+      cmdPressKey(KEY_PAGE_DOWN);
+    }
+    else if (prevCmd == "PRINTSCREEN") {
+      cmdPressKey(KEY_PRINTSCREEN);
+    }
+    else if (prevCmd == "SCROLLLOCK") {
+      cmdPressKey(KEY_SCROLLLOCK);
+    }
+    else if (prevCmd == "SPACE") {
+      cmdPressKey(KEY_SPACE);
+    }
+    else if (prevCmd == "TAB") {
+      cmdPressKey(KEY_TAB);
+    }
+    else if (cmd == "CTRL" || cmd == "CONTROL" ) {
+      cmdKeyCombo(KEY_LEFT_CTRL, prevArg);
+    }
+    else if (cmd == "ALT") {
+      cmdKeyCombo(KEY_LEFT_ALT, prevArg);
+    }
+    else if (cmd == "SHIFT") {
+      cmdKeyCombo(KEY_LEFT_SHIFT, prevArg);
+    }
+    else if (cmd == "F1") {
+      cmdPressKey(KEY_F1);
+    }
+    else if (cmd == "F2") {
+      cmdPressKey(KEY_F2);
+    }
+    else if (cmd == "F3") {
+      cmdPressKey(KEY_F3);
+    }
+    else if (cmd == "F4") {
+      cmdPressKey(KEY_F4);
+    }
+    else if (cmd == "F5") {
+      cmdPressKey(KEY_F5);
+    }
+    else if (cmd == "F6") {
+      cmdPressKey(KEY_F6);
+    }
+    else if (cmd == "F7") {
+      cmdPressKey(KEY_F7);
+    }
+    else if (cmd == "F8") {
+      cmdPressKey(KEY_F8);
+    }
+    else if (cmd == "F9") {
+      cmdPressKey(KEY_F9);
+    }
+    else if (cmd == "F10") {
+      cmdPressKey(KEY_F10);
+    }
+    else if (cmd == "F11") {
+      cmdPressKey(KEY_F11);
+    }
+    else if (cmd == "F12") {
+      cmdPressKey(KEY_F12);
+    }
+  }
+  cmd = "";
+  arg = "";
+}
+
+void loop() {
+}
+
+void delivery (String fileName) {
+  delay(800);
+  File dataFile = SD.open(fileName);
+
+  if (dataFile) {
+    while (dataFile.available()) {
+      if (defaultDelay != 0) {
+        delay(defaultDelay);
+      }
+
+      parseCmd(dataFile);
+
+      if (cmd == "GUI" || cmd == "WINDOWS") {
+        if (breakChar == ' ') {
+          argChar = dataFile.read();
+          cmdGui(argChar);
+          //just to remove trailing \n
+          dataFile.read();
+        }
+        else {
+          cmdGui(0x00);
+        }
+
+      }
+      else if (cmd == "DELAY") {
+        parseArg(dataFile);
+        cmdDelay(arg);
+      }
+      else if (cmd == "STRING") {
+        cmdString(dataFile);
+      }
+      else if (cmd == "ENTER") {
+
+        cmdPressKey(KEY_RETURN);
+      }
+      else if (cmd == "REM") {
+        if (breakChar == ' ') {
+          parseArg(dataFile);
+        }
+        cmdRem();
+      }
+      else if (cmd == "DEFAULT_DELAY" || cmd == "DEFAULTDELAY") {
+        parseArg(dataFile);
+        cmdDefaultDelay(arg);
+      }
+      else if (cmd == "MENU" || cmd == "APP") {
+        cmdPressKey(KEY_MENU);
+      }
+      else if (cmd == "DOWNARROW" || cmd == "DOWN") {
+        cmdPressKey(KEY_DOWN_ARROW);
+      }
+      else if (cmd == "LEFTARROW" || cmd == "LEFT") {
+        cmdPressKey(KEY_LEFT_ARROW);
+      }
+      else if (cmd == "RIGHTARROW" || cmd == "RIGHT") {
+        cmdPressKey(KEY_RIGHT_ARROW);
+      }
+      else if (cmd == "UPARROW" || cmd == "UP") {
+        cmdPressKey(KEY_UP_ARROW);
+      }
+      else if (cmd == "BREAK" || cmd == "PAUSE") {
+        cmdPressKey(KEY_BREAK);
+      }
+      else if (cmd == "CAPSLOCK") {
+        cmdPressKey(KEY_CAPS_LOCK);
+      }
+      else if (cmd == "DELETE") {
+        cmdPressKey(KEY_DELETE);
+      }
+      else if (cmd == "END") {
+        cmdPressKey(KEY_END);
+      }
+      else if (cmd == "ESC" || cmd == "ESCAPE") {
+        cmdPressKey(KEY_ESC);
+      }
+      else if (cmd == "HOME") {
+        cmdPressKey(KEY_HOME);
+      }
+      else if (cmd == "INSERT") {
+        cmdPressKey(KEY_INSERT);
+      }
+      else if (cmd == "NUMLOCK") {
+        cmdPressKey(KEY_NUMLOCK);
+      }
+      else if (cmd == "PAGEUP") {
+        cmdPressKey(KEY_PAGE_UP);
+      }
+      else if (cmd == "PAGEDOWN") {
+        cmdPressKey(KEY_PAGE_DOWN);
+      }
+      else if (cmd == "PRINTSCREEN") {
+        cmdPressKey(KEY_PRINTSCREEN);
+      }
+      else if (cmd == "SCROLLLOCK") {
+        cmdPressKey(KEY_SCROLLLOCK);
+      }
+      else if (cmd == "SPACE") {
+        cmdPressKey(KEY_SPACE);
+      }
+      else if (cmd == "TAB") {
+        cmdPressKey(KEY_TAB);
+      }
+      else if (cmd == "REPEAT") {
+        parseArg(dataFile);
+        cmdRepeat(arg);
+      }
+      else if (cmd == "CTRL" || cmd == "CONTROL" ) {
+        parseArg(dataFile);
+        arg = arg + '\n';
+        cmdKeyCombo(KEY_LEFT_CTRL, arg);
+      }
+      else if (cmd == "ALT") {
+        parseArg(dataFile);
+        arg = arg + '\n';
+        cmdKeyCombo(KEY_LEFT_ALT, arg);
+      }
+      else if (cmd == "SHIFT") {
+        parseArg(dataFile);
+        arg = arg + '\n';
+        cmdKeyCombo(KEY_LEFT_SHIFT, arg);
+      }
+      else if (cmd == "F1") {
+        cmdPressKey(KEY_F1);
+      }
+      else if (cmd == "F2") {
+        cmdPressKey(KEY_F2);
+      }
+      else if (cmd == "F3") {
+        cmdPressKey(KEY_F3);
+      }
+      else if (cmd == "F4") {
+        cmdPressKey(KEY_F4);
+      }
+      else if (cmd == "F5") {
+        cmdPressKey(KEY_F5);
+      }
+      else if (cmd == "F6") {
+        cmdPressKey(KEY_F6);
+      }
+      else if (cmd == "F7") {
+        cmdPressKey(KEY_F7);
+      }
+      else if (cmd == "F8") {
+        cmdPressKey(KEY_F8);
+      }
+      else if (cmd == "F9") {
+        cmdPressKey(KEY_F9);
+      }
+      else if (cmd == "F10") {
+        cmdPressKey(KEY_F10);
+      }
+      else if (cmd == "F11") {
+        cmdPressKey(KEY_F11);
+      }
+      else if (cmd == "F12") {
+        cmdPressKey(KEY_F12);
+      }
+      else {
+        errLog = true;
+        cmd = "";
+        arg = "";
+        continue;
+      }
+    }
+    dataFile.close();
+  }
+  else {
+    Serial.println("Error opening script file");
+  }
+}
+
+void management() {
+  digitalWrite(led2, HIGH);
+
+  while (!Serial) {
+    if (errLog) {
+      digitalWrite(led2, HIGH);
+      delay(200);
+      digitalWrite(led2, LOW);
+      delay(200);
+    }
+    ;
+  }
+
+  Serial.println("Available payloads:");
+  printDirectory(root, 0);
+  root.close();
+  Serial.println();
+  Serial.println("Available modes: ");
+  Serial.println("m => management mode");
+  Serial.println("a => auto-disarm mode");
+  Serial.println("c => continuous delivery mode");
+  Serial.println();
+  Serial.print("Current mode: ");
+  Serial.println(mode);
+  Serial.print("Current language: ");
+  Serial.println(lang);
+  Serial.print("Current payload: ");
+  Serial.println(payload);
+  Serial.println();
+  Serial.println("Input mode:");
+  writeConfig("mode.cfg", inputData());
+  Serial.println();
+  Serial.println("Input language:");
+  writeConfig("lang.cfg", inputData());
+  Serial.println();
+  Serial.println("Input payload:");
+  writeConfig("exec.cfg", inputData());
+  Serial.println();
+  Serial.println("Get ready to have some fun :)");
+}
+
+void setup() {
+  pinMode(led2, OUTPUT);
+  pinMode(LED_BUILTIN, OUTPUT);
+  Keyboard.begin();
+  Serial.begin(9600);
+
+  if (!SD.begin(chipSelect)) {
+    Serial.println("Card failed, or not present");
+    return;
+  }
+
+  root = SD.open("/");
+
+  mode = readConfig("mode.cfg");
+  payload = readConfig("exec.cfg");
+  lang = readConfig("lang.cfg");
+
+  if (lang != "en") {
+    loadLangMap("lang/" + lang + ".bin");
+  }
+
+  if (mode == "c") {
+    delivery(payload);
+  }
+  else if (mode == "a") {
+    delivery(payload);
+    mode = "m";
+    writeConfig("mode.cfg", mode);
+  }
+
+  management();
+
+  Keyboard.end();
+}
