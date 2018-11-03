@@ -1,0 +1,3 @@
+[submodule "ducky_interpreter/arduino_keyboardlib"]
+	path = ducky_interpreter/libraries/arduino_keyboardlib
+	url = git@github.com-drymer:drym3r/arduino_keyboardlib.git
